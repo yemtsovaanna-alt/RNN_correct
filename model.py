@@ -20,13 +20,9 @@ class LanguageModel(nn.Module):
         self.vocab_size = dataset.vocab_size
         self.max_length = dataset.max_length
 
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Create necessary layers
-        """
-        self.embedding = None
-        self.rnn = None
-        self.linear = None
+        self.embedding = nn.Embedding(self.vocab_size, embed_size)
+        self.rnn = rnn_type(embed_size, hidden_size, num_layers=rnn_layers, batch_first=True)
+        self.linear = nn.Linear(hidden_size, self.vocab_size)
 
     def forward(self, indices: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
         """
@@ -36,16 +32,14 @@ class LanguageModel(nn.Module):
         :param lengths: LongTensor of lengths of size (batch_size, )
         :return: FloatTensor of logits of shape (batch_size, length, vocab_size)
         """
-        # This is a placeholder, you may remove it.
-        logits = torch.randn(
-            indices.shape[0], indices.shape[1], self.vocab_size,
-            device=indices.device
+        max_len = lengths.max().item()
+        embeddings = self.embedding(indices[:, :max_len])
+        packed = nn.utils.rnn.pack_padded_sequence(
+            embeddings, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Convert indices to embeddings, pass them through recurrent layers
-        and apply output linear layer to obtain the logits
-        """
+        output, _ = self.rnn(packed)
+        output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
+        logits = self.linear(output)
         return logits
 
     @torch.inference_mode()
@@ -57,14 +51,28 @@ class LanguageModel(nn.Module):
         :return: generated text
         """
         self.eval()
-        # This is a placeholder, you may remove it.
-        generated = prefix + ', а потом купил мужик шляпу, а она ему как раз.'
-        """
-        YOUR CODE HERE (⊃｡•́‿•̀｡)⊃━✿✿✿✿✿✿
-        Encode the prefix (do not forget the BOS token!),
-        pass it through the model to accumulate RNN hidden state and
-        generate new tokens sequentially, sampling from categorical distribution,
-        until EOS token or reaching self.max_length.
-        Do not forget to divide predicted logits by temperature before sampling
-        """
-        return generated
+        device = next(self.parameters()).device
+
+        # Encode prefix with BOS
+        tokens = [self.dataset.bos_id]
+        if prefix:
+            tokens.extend(self.dataset.text2ids(prefix))
+
+        # Pass prefix through RNN to build hidden state
+        hidden = None
+        for token in tokens:
+            inp = torch.tensor([[token]], device=device)
+            output, hidden = self.rnn(self.embedding(inp), hidden)
+
+        # Generate new tokens one by one
+        generated_ids = []
+        for _ in range(self.max_length - len(tokens)):
+            logits = self.linear(output.squeeze(1)) / temp
+            next_token = torch.multinomial(torch.softmax(logits, dim=-1), 1).item()
+            if next_token == self.dataset.eos_id:
+                break
+            generated_ids.append(next_token)
+            inp = torch.tensor([[next_token]], device=device)
+            output, hidden = self.rnn(self.embedding(inp), hidden)
+
+        return prefix + self.dataset.ids2text(generated_ids)
